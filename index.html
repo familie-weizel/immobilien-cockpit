@@ -1,0 +1,1204 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Cockpit">
+<meta name="theme-color" content="#f8fafc">
+<meta name="robots" content="noindex, nofollow">
+<title>Immobilien-Cockpit</title>
+<!-- Immobilien-Cockpit · Immobilien Weizel eGbR · Schritt 3 (Grundgerüst, nur lesend) · 2026-09-30 -->
+<!-- Öffentliches Repo: KEINE echten Daten im Code. Echte Zahlen liegen nur in Firestore. -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  .zahl { font-variant-numeric: tabular-nums; }
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .scroll-x::-webkit-scrollbar { display: none; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+<div id="root"><div style="padding:48px 16px;text-align:center;color:#64748b;font-family:-apple-system,sans-serif">Cockpit lädt …</div></div>
+<script>
+  /* Falls die App nicht startet: verständlicher Hinweis statt endlos „lädt" */
+  window.__fehler = [];
+  window.addEventListener("error", function (e) { window.__fehler.push(e.message || "Skript konnte nicht geladen werden"); }, true);
+  setTimeout(function () {
+    var r = document.getElementById("root");
+    if (r && r.textContent.indexOf("Cockpit lädt") === 0) {
+      r.innerHTML = '<div style="max-width:30rem;margin:48px auto;padding:0 16px;font-family:-apple-system,sans-serif;color:#334155;line-height:1.5">' +
+        '<b>Das Cockpit startet hier nicht.</b><br>Es läuft nur über seine Internetadresse ' +
+        '(familie-weizel.github.io/immobilien-cockpit) mit Internetverbindung — nicht in einer Datei-Vorschau.' +
+        (window.__fehler.length ? '<div style="margin-top:12px;font-size:12px;color:#94a3b8">Technisch: ' + window.__fehler.slice(0, 3).join(" · ") + '</div>' : '') + '</div>';
+    }
+  }, 12000);
+</script>
+
+<script type="text/babel" data-type="module" data-presets="react">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, sendPasswordResetEmail, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getFirestore, collection, getDocs, doc, writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const { useState, useEffect, useMemo } = React;
+
+/* =========================================================================
+   1. EINSTELLUNGEN
+   ========================================================================= */
+const VERSION = "Schritt 3 · Grundgerüst · 30.09.2026";
+const IMPORT_FREIGEGEBEN = false;              // Schritt 4: auf true setzen
+const CASHFLOW_HAUPTSTUFE = "nachKapitaldienst"; // offen für die Werte-Prüfung
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAQMhs_gIiGZpKM7_hY9Db1yhRMGWWWIrw",
+  authDomain: "immobilien-weizel-cockpit.firebaseapp.com",
+  projectId: "immobilien-weizel-cockpit",
+  storageBucket: "immobilien-weizel-cockpit.firebasestorage.app",
+  messagingSenderId: "374969847525",
+  appId: "1:374969847525:web:efe183362cecd547e78e0c"
+};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+auth.languageCode = "de";
+const db = getFirestore(app);
+
+/* Sammlungen laut Feldliste Fassung 2 — mit erlaubten Unter-Sammlungen (Verläufe) */
+const SAMMLUNGEN = {
+  gesellschaft: [], gesellschafter: [], privat_gesellschafter: [], beschluesse: [],
+  konten: ["staende"],
+  objekte: ["flaeche_grundstueck"],
+  einheiten: ["flaechen"],
+  mietverhaeltnisse: ["miete", "vorauszahlung", "personen", "vergleichsmiete"],
+  privat_mietverhaeltnisse: [],
+  darlehen: ["restschuld", "auszahlungen", "zinsen"],
+  grundschulden: [], massnahmen: [], kosten: [],
+  versicherungen: ["beitraege"],
+  bewertungen: [], steuer: [],
+  zaehler: ["staende"], schluessel: [], kontakte: [], vertraege: [],
+  ereignisse: [], fristen: [], dokumente: [], annahmen: []
+};
+/* Was die Anzeige in Schritt 3 liest (Nur-Sebi-Sammlungen bewusst nicht) */
+const LESEN = ["objekte", "einheiten", "mietverhaeltnisse", "darlehen", "grundschulden",
+  "massnahmen", "kosten", "versicherungen", "bewertungen", "fristen", "annahmen"];
+
+const REITER = [
+  ["mieten", "Einheiten & Mieten"], ["finanzierung", "Finanzierung"], ["massnahmen", "Maßnahmen"],
+  ["bewertung", "Bewertung"], ["versicherung", "Versicherung"], ["fristen", "Fristen"]
+];
+
+/* =========================================================================
+   2. TESTZAHLEN — frei erfunden, nur zum Prüfen von Aufbau und Rechenwegen
+   ========================================================================= */
+function baueTestdaten() {
+  const T = (wert, kz = "B") => ({ wert, kz, quelle: "Testzahl", notiz: "" });
+  const objekte = {
+    "FR-WIL-66": { bezeichnung: "Haus 66", adresse: "Testadresse 66", art: "Mehrfamilienhaus", baujahr: 1932,
+      gruppe: "Ensemble Wildtal", status: "Bestand", kaufdatum: "2021-06-01",
+      kaufpreis: T(640000, "belegt"), kaufnebenkosten: T(48000, "belegt") },
+    "FR-WIL-68": { bezeichnung: "Haus 68", adresse: "Testadresse 68", art: "Mehrfamilienhaus", baujahr: 1952,
+      gruppe: "Ensemble Wildtal", status: "Bestand", kaufdatum: "2021-06-01",
+      kaufpreis: T(660000, "belegt"), kaufnebenkosten: T(50000, "belegt") },
+    "FR-OLT-06": { bezeichnung: "Wohnung Nr. 14", adresse: "Testadresse 6", art: "Eigentumswohnung", baujahr: 1965,
+      gruppe: "", status: "Bestand", kaufdatum: "2025-09-01", versicherung_ueber_weg: true,
+      kaufpreis: T(105000, "belegt"), kaufnebenkosten: T(11000, "belegt") }
+  };
+  const einheiten = {}, mietverhaeltnisse = {};
+  const E = (oid, k, art, lage, zimmer, wohn, balkon, extra = {}) => {
+    const e = { objekt: oid, kuerzel: k, art, lage, zimmer, moebliert: !!extra.moebliert };
+    if (art === "Wohnung") e._unter = { flaechen: { f1: { art: "wohn", wert: T(wohn), balkon_terrasse: balkon, gueltig_ab: "2021-06-01" } } };
+    einheiten[`${oid}-${k}`] = e;
+  };
+  const M = (eid, mieter, beginn, mieten, vz, extra = {}) => {
+    const miete = {}; mieten.forEach(([ab, betrag, artA], i) => miete["m" + (i + 1)] = { gueltig_ab: ab, kaltmiete: T(betrag), art_aenderung: artA });
+    const u = { miete };
+    if (vz) u.vorauszahlung = { v1: { gueltig_ab: beginn, betrag: T(vz) } };
+    mietverhaeltnisse[`${eid}-${beginn.slice(0, 7)}`] = { einheit: eid, mieter, beginn, ende: null,
+      art: extra.gesellschafter ? "gesellschafter" : "fremd", gehoert_zu: extra.gehoert_zu || null,
+      kaution: T(extra.kaution || 0), besonderheiten: extra.besonderheiten || "", _unter: u };
+  };
+  // Haus 66
+  E("FR-WIL-66", "WE01", "Wohnung", "KG", 2, 48, 0);
+  E("FR-WIL-66", "WE02", "Wohnung", "EG", 3, 58, 9);
+  E("FR-WIL-66", "WE03", "Wohnung", "OG", 3, 62, 8);
+  E("FR-WIL-66", "WE04", "Wohnung", "DG", 2, 42, 6);
+  E("FR-WIL-66", "GA1", "Garage", "links");
+  E("FR-WIL-66", "GA2", "Garage", "rechts");
+  M("FR-WIL-66-WE01", "Testmieter A", "2023-10-01", [["2023-10-01", 590, "Neuvertrag"]], 140, { kaution: 1770 });
+  M("FR-WIL-66-WE02", "Testmieter B", "2022-01-01", [["2022-01-01", 720, "Neuvertrag"], ["2024-03-01", 790, "§ 559"]], 180, { gesellschafter: true, kaution: 2160 });
+  M("FR-WIL-66-WE03", "Testmieter C", "2019-05-01", [["2019-05-01", 700, "Neuvertrag"], ["2023-07-01", 760, "§ 558"], ["2024-03-01", 830, "§ 559"]], 190, { kaution: 2100 });
+  M("FR-WIL-66-WE04", "Testmieter D", "2024-07-01", [["2024-07-01", 640, "Neuvertrag"]], 150, { kaution: 1920 });
+  M("FR-WIL-66-GA1", "Testmieter B", "2022-01-01", [["2022-01-01", 60, "Neuvertrag"]], 0, { gehoert_zu: "FR-WIL-66-WE02-2022-01" });
+  M("FR-WIL-66-GA2", "Testmieter E", "2021-06-01", [["2021-06-01", 65, "Neuvertrag"]], 0);
+  // Haus 68
+  E("FR-WIL-68", "WE01", "Wohnung", "EG", 3, 72, 9);
+  E("FR-WIL-68", "WE02", "Wohnung", "OG", 2, 66, 8);
+  E("FR-WIL-68", "WE03", "Wohnung", "DG", 2, 50, 6);
+  E("FR-WIL-68", "GA1", "Garage", "links");
+  E("FR-WIL-68", "GA2", "Garage", "rechts");
+  M("FR-WIL-68-WE01", "Testmieter F", "2022-05-01", [["2022-05-01", 820, "Neuvertrag"], ["2024-03-01", 900, "§ 559"]], 220, { kaution: 2460, besonderheiten: "Tierhaltung vereinbart" });
+  M("FR-WIL-68-WE02", "Testmieter G und H", "2012-03-01", [["2012-03-01", 600, "Neuvertrag"], ["2024-03-01", 680, "§ 559"]], 130, { kaution: 1200, besonderheiten: "Umlage Kaltwasser nach Köpfen" });
+  M("FR-WIL-68-WE03", "Testmieter I", "1995-10-01", [["1995-10-01", 270, "Neuvertrag"], ["2024-03-01", 330, "§ 559"]], 60, { kaution: 510 });
+  M("FR-WIL-68-GA1", "Testmieter F", "2022-05-01", [["2022-05-01", 55, "Neuvertrag"]], 0, { gehoert_zu: "FR-WIL-68-WE01-2022-05" });
+  // GA2 Haus 68 bewusst ohne Mietverhältnis → zeigt „leer"
+  // Oltmannstraße
+  E("FR-OLT-06", "WE14", "Wohnung", "DG", 1, 22, 0, { moebliert: true });
+  M("FR-OLT-06-WE14", "Testmieter J", "2026-01-01", [["2026-01-01", 640, "Neuvertrag"]], 120, { kaution: 1500 });
+
+  const darlehen = {
+    "TEST-DL-1": { bank: "Testbank", zweck: "Ankauf Ensemble", zuordnung: [{ objekt: "FR-WIL-66", anteil: 0.5 }, { objekt: "FR-WIL-68", anteil: 0.5 }],
+      darlehensnehmer_rechtlich: "eGbR", darlehensnehmer_wirtschaftlich: "eGbR", bewilligt: T(1150000, "belegt"),
+      zins: T(1.2, "belegt"), rate: T(3700, "belegt"), bindung_bis: "2031-06-30",
+      _unter: { restschuld: { r1: { stichtag: "2025-12-31", wert: T(1010000, "belegt") } } } },
+    "TEST-DL-2": { bank: "Testbank", zweck: "Balkone", zuordnung: [{ objekt: "FR-WIL-66", anteil: 0.5 }, { objekt: "FR-WIL-68", anteil: 0.5 }],
+      darlehensnehmer_rechtlich: "Gesellschafterin (Test)", darlehensnehmer_wirtschaftlich: "eGbR", bewilligt: T(160000, "belegt"),
+      zins: T(3.4, "belegt"), rate: T(780, "belegt"), bindung_bis: "2033-03-30",
+      _unter: { restschuld: { r1: { stichtag: "2025-12-31", wert: T(148000, "belegt") } } } },
+    "TEST-DL-3": { bank: "Testbank", zweck: "Ankauf Wohnung", zuordnung: [{ objekt: "FR-OLT-06", anteil: 1 }],
+      darlehensnehmer_rechtlich: "eGbR", darlehensnehmer_wirtschaftlich: "eGbR", bewilligt: T(114000, "belegt"),
+      zins: T(3.9, "belegt"), rate: T(470, "belegt"), bindung_bis: "2035-08-30",
+      _unter: { restschuld: { r1: { stichtag: "2025-12-31", wert: T(112800, "belegt") } } } }
+  };
+  const grundschulden = {
+    g1: { betrag: T(1400000, "belegt"), rang: 1, blatt: "Test-1", belastet: ["FR-WIL-66", "FR-WIL-68"], extern: "" },
+    g2: { betrag: T(90000, "belegt"), rang: 1, blatt: "Test-2", belastet: [], extern: "Grundstück außerhalb des Bestands", sichert_fuer: ["FR-WIL-66", "FR-WIL-68"] },
+    g3: { betrag: T(125000, "belegt"), rang: 1, blatt: "Test-3", belastet: ["FR-OLT-06"], extern: "" }
+  };
+  const massnahmen = {
+    m1: { titel: "Balkonanbau", zuordnung: [{ objekt: "FR-WIL-66", anteil: 0.5 }, { objekt: "FR-WIL-68", anteil: 0.5 }], von: "2023-04-01", bis: "2024-02-28",
+      kategorie: "Modernisierung", steuerlich: T(150000, "belegt"), bezahlt: T(158000, "belegt"), wert: T(195000), stunden: 420, mietwirkung: "§ 559-Umlage", voreigentuemer: false },
+    m2: { titel: "Renovierung Erdgeschoss", zuordnung: [{ objekt: "FR-WIL-66", anteil: 1 }], von: "2023-01-01", bis: "2023-06-30",
+      kategorie: "Instandhaltung", steuerlich: T(21000, "belegt"), bezahlt: T(21000, "belegt"), wert: T(34000), stunden: 260, mietwirkung: "", voreigentuemer: false },
+    m3: { titel: "Dacheindeckung", zuordnung: [{ objekt: "FR-WIL-68", anteil: 1 }], von: "2015-01-01", bis: "2015-12-31",
+      kategorie: "Instandhaltung", steuerlich: null, bezahlt: null, wert: T(30000), stunden: 0, mietwirkung: "", voreigentuemer: true },
+    m4: { titel: "Renovierung und Küche", zuordnung: [{ objekt: "FR-OLT-06", anteil: 1 }], von: "2025-10-01", bis: "2025-12-15",
+      kategorie: "Instandhaltung", steuerlich: T(10500, "belegt"), bezahlt: T(10500, "belegt"), wert: T(12800), stunden: 60, mietwirkung: "", voreigentuemer: false }
+  };
+  const kosten = {
+    k1: { jahr: 2025, zuordnung: [{ objekt: "FR-WIL-66", anteil: 1 }], kostenart: "Kontoführung und GbR-Kosten", betrag: T(320, "belegt"), umlagefaehig: false },
+    k2: { jahr: 2025, zuordnung: [{ objekt: "FR-WIL-66", anteil: 1 }], kostenart: "Grundsteuer", betrag: T(900, "belegt"), umlagefaehig: true, schluessel: "Wohnfläche" },
+    k3: { jahr: 2025, zuordnung: [{ objekt: "FR-WIL-68", anteil: 1 }], kostenart: "Grundsteuer", betrag: T(820, "belegt"), umlagefaehig: true, schluessel: "Wohnfläche" },
+    k4: { jahr: 2026, zuordnung: [{ objekt: "FR-OLT-06", anteil: 1 }], kostenart: "Hausgeld nicht umlagefähig", betrag: T(650, "belegt"), umlagefaehig: false }
+    // Haus 68 bewusst ohne nicht umlagefähige Kosten → zeigt den Hinweis „ohne …"
+  };
+  const versicherungen = {
+    v1: { objekt: "FR-WIL-66", versicherer: "Testversicherung", vertragsnummer: "TEST-V-66", sparten: "Wohngebäude, Haftpflicht",
+      vn_ist: "GbR", vn_soll: "eGbR", flaeche_versichert: T(188, "belegt"), flaeche_tatsaechlich: T(209), kuendigungsfrist: "3 Monate zum Jahresende",
+      _unter: { beitraege: { "2026": { jahr: 2026, betrag: T(1410, "belegt") }, "2027": { jahr: 2027, betrag: T(1560) } } } },
+    v2: { objekt: "FR-WIL-68", versicherer: "Testversicherung", vertragsnummer: "TEST-V-68", sparten: "Wohngebäude, Haftpflicht",
+      vn_ist: "GbR", vn_soll: "eGbR", flaeche_versichert: T(188, "belegt"), flaeche_tatsaechlich: T(188), kuendigungsfrist: "3 Monate zum Jahresende",
+      _unter: { beitraege: { "2026": { jahr: 2026, betrag: T(1220, "belegt") }, "2027": { jahr: 2027, betrag: T(1330) } } } }
+  };
+  const bewertungen = {
+    b1: { objekt: "FR-WIL-66", stichtag: "2026-08-28", art: "ist", methode: "Ertragswert", wert: T(1000000), quelle: "Testzahl" },
+    b2: { objekt: "FR-WIL-66", stichtag: "2026-08-28", art: "potenzial", methode: "Richtwert", wert: T(1200000), quelle: "Testzahl" },
+    b3: { objekt: "FR-WIL-68", stichtag: "2026-08-28", art: "ist", methode: "Ertragswert", wert: T(700000), quelle: "Testzahl" },
+    b4: { objekt: "FR-WIL-68", stichtag: "2026-08-28", art: "potenzial", methode: "Richtwert", wert: T(860000), quelle: "Testzahl" },
+    b5: { objekt: "FR-OLT-06", stichtag: "2026-08-28", art: "ist", methode: "Ertragswert", wert: T(125000), quelle: "Testzahl" },
+    b6: { objekt: "FR-OLT-06", stichtag: "2026-08-28", art: "potenzial", methode: "Richtwert", wert: T(150000), quelle: "Testzahl" }
+  };
+  const fristen = {
+    f1: { titel: "Test: Anfechtungsfrist Eigentümerversammlung", objekte: ["FR-OLT-06"], faellig_am: "2026-10-01", status: "offen" },
+    f2: { titel: "Test: Sonderkündigung Gebäudeversicherung", objekte: ["FR-WIL-66", "FR-WIL-68"], faellig_am: "2026-10-31", status: "offen" },
+    f3: { titel: "Test: Zustimmung Bank zum Versicherungswechsel", objekte: ["FR-WIL-66", "FR-WIL-68"], faellig_am: "2026-12-01", status: "offen" },
+    f4: { titel: "Test: Nebenkostenabrechnung 2025", objekte: ["FR-WIL-66", "FR-WIL-68"], faellig_am: "2026-12-31", status: "offen", rhythmus: "jährlich" },
+    f5: { titel: "Test: Zählerablesung", objekte: ["FR-WIL-66", "FR-WIL-68"], faellig_am: "2026-12-31", status: "offen", rhythmus: "jährlich" },
+    f6: { titel: "Test: Zinsbindungsende Ankauf Ensemble", objekte: ["FR-WIL-66", "FR-WIL-68"], faellig_am: "2031-06-30", status: "offen" }
+  };
+  const annahmen = {
+    "FR-WIL-66-2025": { objekt: "FR-WIL-66", gueltig_ab: "2025-01-01", ruecklage_art: "kalkulatorisch", ruecklage_satz: T(10), flaechenbezug: "Wohnfläche ohne Balkon/Terrasse" },
+    "FR-WIL-68-2025": { objekt: "FR-WIL-68", gueltig_ab: "2025-01-01", ruecklage_art: "kalkulatorisch", ruecklage_satz: T(10), flaechenbezug: "Wohnfläche ohne Balkon/Terrasse" },
+    "FR-OLT-06-2026": { objekt: "FR-OLT-06", gueltig_ab: "2026-01-01", ruecklage_art: "weg", ruecklage_betrag_jahr: T(570) }
+  };
+  return { objekte, einheiten, mietverhaeltnisse, darlehen, grundschulden, massnahmen, kosten, versicherungen, bewertungen, fristen, annahmen };
+}
+
+/* =========================================================================
+   3. HILFSFUNKTIONEN
+   ========================================================================= */
+const w = x => (x && typeof x === "object" && "wert" in x) ? x.wert : x;
+const zahl = x => { const v = w(x); return (typeof v === "number" && !isNaN(v)) ? v : null; };
+const heute = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const liste = u => Object.entries(u || {}).map(([id, e]) => ({ id, ...e }));
+const nfEUR = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 });
+const eur = n => (n == null || isNaN(n)) ? "–" : nfEUR.format(Math.round(n)) + " €";
+const eur2 = n => (n == null || isNaN(n)) ? "–" : n.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+const proz = (n, d = 1) => (n == null || isNaN(n)) ? "–" : (n * 100).toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d }) + " %";
+const m2 = n => (n == null || isNaN(n)) ? "–" : n.toLocaleString("de-DE", { maximumFractionDigits: 1 }) + " m²";
+const datum = iso => iso ? String(iso).slice(0, 10).split("-").reverse().join(".") : "–";
+const monatJahr = iso => iso ? `${iso.slice(5, 7)}/${iso.slice(0, 4)}` : "–";
+const plusMonate = (iso, n) => { const [y, m] = iso.split("-").map(Number); const t = y * 12 + (m - 1) + n; return `${Math.floor(t / 12)}-${String(t % 12 + 1).padStart(2, "0")}-01`; };
+const monateZwischen = (von, bis) => {
+  const [y1, m1, d1] = von.split("-").map(Number), [y2, m2_, d2] = bis.split("-").map(Number);
+  return Math.max(0, (y2 - y1) * 12 + (m2_ - m1) - (d2 < d1 ? 1 : 0));
+};
+const tageBis = iso => Math.round((new Date(iso + "T12:00:00") - new Date(heute() + "T12:00:00")) / 86400000);
+
+/* letzter gültiger Eintrag eines Verlaufs zum Stichtag */
+function aktuell(eintraege, feld = "gueltig_ab", stichtag = heute()) {
+  const l = (Array.isArray(eintraege) ? eintraege : liste(eintraege)).filter(e => e[feld] && e[feld] <= stichtag).sort((a, b) => a[feld] < b[feld] ? -1 : 1);
+  return l.length ? l[l.length - 1] : null;
+}
+/* Anteil eines Postens an einem Objekt */
+function anteilVon(p, oid) {
+  if (Array.isArray(p.zuordnung)) { const z = p.zuordnung.find(z => z.objekt === oid); return z ? Number(z.anteil) || 0 : 0; }
+  return p.objekt === oid ? 1 : 0;
+}
+
+/* =========================================================================
+   4. BERECHNUNG — Kennzahlen werden immer berechnet, nie gespeichert
+   ========================================================================= */
+function simuliere(start, zinsProz, rate, monate) {
+  let rs = start, zinsen = 0, tilgung = 0;
+  for (let i = 0; i < monate && rs > 0; i++) {
+    const z = rs * zinsProz / 100 / 12; const t = Math.min(rate - z, rs);
+    zinsen += z; tilgung += t; rs -= t;
+  }
+  return { rs: Math.max(0, rs), zinsen, tilgung };
+}
+
+function berechneDarlehen(d) {
+  const r = { fehlt: [] };
+  const stand = aktuell(d._unter?.restschuld, "stichtag");
+  const zins = zahl(d.zins), rate = zahl(d.rate);
+  if (!stand || zahl(stand.wert) == null) { r.fehlt.push("Restschuld"); return r; }
+  if (zins == null) r.fehlt.push("Zins");
+  if (rate == null) r.fehlt.push("Rate");
+  r.stichtag = stand.stichtag;
+  if (r.fehlt.length) { r.heute = zahl(stand.wert); r.gerechnet = false; return r; }
+  const n = monateZwischen(stand.stichtag, heute());
+  r.heute = simuliere(zahl(stand.wert), zins, rate, n).rs;
+  r.gerechnet = n > 0;
+  const j = simuliere(r.heute, zins, rate, 12);
+  r.zinsenJahr = j.zinsen; r.tilgungJahr = j.tilgung; r.kapitaldienstJahr = rate * 12;
+  if (d.bindung_bis) r.bindungsende = simuliere(r.heute, zins, rate, monateZwischen(heute(), d.bindung_bis)).rs;
+  return r;
+}
+
+function berechneObjekt(ds, oid) {
+  const obj = ds.objekte[oid] || {};
+  const h = heute();
+  const R = { id: oid, obj, hinweise: [] };
+
+  /* Einheiten und Mieten */
+  const reihen = { Wohnung: 0, Garage: 1 };
+  R.einheiten = liste(ds.einheiten).filter(e => e.objekt === oid)
+    .sort((a, b) => (reihen[a.art] ?? 2) - (reihen[b.art] ?? 2) || String(a.kuerzel).localeCompare(String(b.kuerzel)))
+    .map(e => {
+      const mv = liste(ds.mietverhaeltnisse).filter(m => m.einheit === e.id && m.beginn && m.beginn <= h && (!m.ende || m.ende >= h))
+        .sort((a, b) => a.beginn < b.beginn ? 1 : -1)[0] || null;
+      const fl = aktuell(liste(e._unter?.flaechen).filter(f => f.art === "wohn"));
+      const x = { ...e, mv, wohnflaeche: fl ? zahl(fl.wert) : null, balkon: fl ? Number(fl.balkon_terrasse) || 0 : 0 };
+      if (mv) {
+        const mieten = liste(mv._unter?.miete).sort((a, b) => a.gueltig_ab < b.gueltig_ab ? -1 : 1);
+        const akt = aktuell(mieten);
+        x.kaltmiete = akt ? zahl(akt.kaltmiete) : null;
+        x.letzteAenderung = akt;
+        const vz = aktuell(mv._unter?.vorauszahlung); x.vorauszahlung = vz ? zahl(vz.betrag) : null;
+        const basis558 = mieten.filter(m => m.gueltig_ab <= h && m.art_aenderung !== "§ 559").pop();
+        x.frueheste558 = basis558 ? plusMonate(basis558.gueltig_ab, 15) : null;
+        x.letzte558 = mieten.filter(m => m.art_aenderung === "§ 558" && m.gueltig_ab <= h).pop() || null;
+      }
+      return x;
+    });
+  const vermietet = R.einheiten.filter(e => e.mv);
+  R.mieteMonat = vermietet.reduce((s, e) => s + (e.kaltmiete || 0), 0);
+  R.mieteJahr = R.mieteMonat * 12;
+  R.wohnflaeche = R.einheiten.filter(e => e.art === "Wohnung").reduce((s, e) => s + (e.wohnflaeche || 0), 0);
+  const whg = R.einheiten.filter(e => e.art === "Wohnung");
+  R.quote = { whgGesamt: whg.length, whgVermietet: whg.filter(e => e.mv).length,
+    gesGesamt: R.einheiten.length, gesVermietet: vermietet.length };
+
+  /* Finanzierung */
+  R.darlehen = liste(ds.darlehen).map(d => ({ d, anteil: anteilVon(d, oid), r: berechneDarlehen(d) })).filter(x => x.anteil > 0);
+  const dFehlt = R.darlehen.filter(x => x.r.fehlt.length);
+  R.restschuld = R.darlehen.reduce((s, x) => s + (x.r.heute || 0) * x.anteil, 0);
+  R.restschuldFehlt = R.darlehen.filter(x => x.r.fehlt.includes("Restschuld")).map(x => `Restschuld ${x.d.id}`);
+  R.restschuldGerechnet = R.darlehen.some(x => x.r.gerechnet);
+  R.restschuldUngerechnet = dFehlt.length > 0;
+  R.zinsenJahr = R.darlehen.reduce((s, x) => s + (x.r.zinsenJahr || 0) * x.anteil, 0);
+  R.kapitaldienstJahr = R.darlehen.reduce((s, x) => s + (x.r.kapitaldienstJahr || 0) * x.anteil, 0);
+  R.grundschulden = liste(ds.grundschulden).filter(g => (g.belastet || []).includes(oid) || (g.sichert_fuer || []).includes(oid));
+
+  /* nicht umlagefähige Kosten — jüngstes Jahr mit Einträgen */
+  const nu = liste(ds.kosten).filter(k => k.umlagefaehig === false && anteilVon(k, oid) > 0);
+  if (nu.length) {
+    R.kostenJahr = Math.max(...nu.map(k => Number(k.jahr) || 0));
+    R.kostenNU = nu.filter(k => Number(k.jahr) === R.kostenJahr).reduce((s, k) => s + (zahl(k.betrag) || 0) * anteilVon(k, oid), 0);
+  } else { R.kostenNU = 0; R.kostenJahr = null; }
+
+  /* Rücklage laut Annahmen */
+  const ann = aktuell(liste(ds.annahmen).filter(a => a.objekt === oid));
+  R.annahme = ann;
+  if (ann?.ruecklage_art === "kalkulatorisch" && zahl(ann.ruecklage_satz) != null) R.ruecklage = zahl(ann.ruecklage_satz) * R.wohnflaeche;
+  else if (ann?.ruecklage_art === "weg" && zahl(ann.ruecklage_betrag_jahr) != null) R.ruecklage = zahl(ann.ruecklage_betrag_jahr);
+  else R.ruecklage = null;
+
+  /* Cashflow in drei Stufen */
+  const cf = { fehlt: [], hinweise: [] };
+  if (!vermietet.length || vermietet.some(e => e.kaltmiete == null)) cf.fehlt.push("Kaltmiete");
+  dFehlt.forEach(x => cf.fehlt.push(`${x.r.fehlt.join(", ")} ${x.d.id}`));
+  if (!nu.length) cf.hinweise.push("ohne nicht umlagefähige Kosten");
+  if (!cf.fehlt.length) {
+    cf.vorTilgung = R.mieteJahr - R.kostenNU - R.zinsenJahr;
+    cf.nachKapitaldienst = R.mieteJahr - R.kostenNU - R.kapitaldienstJahr;
+    cf.nachRuecklage = R.ruecklage == null ? null : cf.nachKapitaldienst - R.ruecklage;
+    if (R.ruecklage == null) cf.fehltRuecklage = true;
+  }
+  R.cashflow = cf;
+
+  /* Bewertung */
+  const bw = liste(ds.bewertungen).filter(b => b.objekt === oid);
+  R.bewertungen = bw.sort((a, b) => a.stichtag < b.stichtag ? 1 : -1);
+  R.wertIst = aktuell(bw.filter(b => b.art === "ist"), "stichtag");
+  R.wertPot = aktuell(bw.filter(b => b.art === "potenzial"), "stichtag");
+  R.vwIst = R.wertIst ? zahl(R.wertIst.wert) : null;
+  R.vwPot = R.wertPot ? zahl(R.wertPot.wert) : null;
+  R.ltvIst = (R.vwIst && !R.restschuldFehlt.length) ? R.restschuld / R.vwIst : null;
+  R.ltvPot = (R.vwPot && !R.restschuldFehlt.length) ? R.restschuld / R.vwPot : null;
+
+  /* Maßnahmen und Kapitalbasis (bezahlt) */
+  R.massnahmen = liste(ds.massnahmen).map(m => ({ m, anteil: anteilVon(m, oid) })).filter(x => x.anteil > 0)
+    .sort((a, b) => (a.m.von || "") < (b.m.von || "") ? 1 : -1);
+  const kp = zahl(obj.kaufpreis), knk = zahl(obj.kaufnebenkosten);
+  R.kapitalbasisFehlt = [];
+  if (kp == null) R.kapitalbasisFehlt.push("Kaufpreis");
+  if (knk == null) R.kapitalbasisFehlt.push("Kaufnebenkosten");
+  R.kapitalbasis = (kp || 0) + (knk || 0) + R.massnahmen.filter(x => !x.m.voreigentuemer).reduce((s, x) => s + (zahl(x.m.bezahlt) || 0) * x.anteil, 0);
+  R.renditeBrutto = (!R.kapitalbasisFehlt.length && R.kapitalbasis) ? R.mieteJahr / R.kapitalbasis : null;
+
+  /* Versicherung und Fristen */
+  R.versicherungen = liste(ds.versicherungen).filter(v => v.objekt === oid || anteilVon(v, oid) > 0);
+  R.fristen = liste(ds.fristen).filter(f => (f.objekte || []).includes(oid) || f.objekt === oid)
+    .filter(f => f.status !== "erledigt").sort((a, b) => a.faellig_am < b.faellig_am ? -1 : 1);
+  return R;
+}
+
+/* Summe über mehrere Objekte (Gruppe oder Portfolio) */
+function summiere(teile) {
+  const S = { mieteMonat: 0, restschuld: 0, vwIst: 0, vwPot: 0, cf: { vorTilgung: 0, nachKapitaldienst: 0, nachRuecklage: 0 }, ohne: {}, hinweise: new Set(), gerechnet: false };
+  const ohne = k => (id) => (S.ohne[k] = S.ohne[k] || []).push(id);
+  teile.forEach(R => {
+    S.mieteMonat += R.mieteMonat;
+    if (R.restschuldFehlt.length) ohne("restschuld")(R.id); else S.restschuld += R.restschuld;
+    if (R.restschuldGerechnet) S.gerechnet = true;
+    if (R.vwIst == null) ohne("vwIst")(R.id); else S.vwIst += R.vwIst;
+    if (R.vwPot == null) ohne("vwPot")(R.id); else S.vwPot += R.vwPot;
+    if (R.cashflow.fehlt.length) ohne("cf")(R.id);
+    else {
+      S.cf.vorTilgung += R.cashflow.vorTilgung; S.cf.nachKapitaldienst += R.cashflow.nachKapitaldienst;
+      if (R.cashflow.nachRuecklage == null) ohne("cfR")(R.id); else S.cf.nachRuecklage += R.cashflow.nachRuecklage;
+      R.cashflow.hinweise.forEach(x => S.hinweise.add(`${R.id} ${x}`));
+    }
+  });
+  S.ltvIst = S.vwIst ? S.restschuld / S.vwIst : null;
+  S.anzahl = teile.length;
+  return S;
+}
+
+/* =========================================================================
+   5. DATEN LADEN UND IMPORT (Vorbereitung Schritt 4)
+   ========================================================================= */
+async function ladeAusFirestore() {
+  const ds = {};
+  await Promise.all(LESEN.map(async name => {
+    const snap = await getDocs(collection(db, name));
+    ds[name] = {};
+    await Promise.all(snap.docs.map(async d => {
+      const e = { ...d.data() };
+      const subs = SAMMLUNGEN[name] || [];
+      if (subs.length) {
+        e._unter = {};
+        await Promise.all(subs.map(async s => {
+          const ss = await getDocs(collection(db, name, d.id, s));
+          if (!ss.empty) { e._unter[s] = {}; ss.docs.forEach(x => e._unter[s][x.id] = x.data()); }
+        }));
+      }
+      ds[name][d.id] = e;
+    }));
+  }));
+  return ds;
+}
+
+const DATUMSFELDER = /^(gueltig_ab|stichtag|datum|beginn|ende|faellig_am|kaufdatum|besitzuebergang|vertragsdatum|bindung_von|bindung_bis|von|bis|seit|gueltig_bis)$/;
+const VERBOTEN = /^(steuer_id|steuerid|geburtsdatum)$/i;
+const NUR_PRIVAT = /^(einkommen|nettoeinkommen|beruf|kautionskonto_iban|iban_kaution)$/i;
+const KZ = ["belegt", "B", "⚠", "⚡"];
+
+function pruefeImport(json) {
+  const fehler = [], warn = [], zaehl = {};
+  if (!json || typeof json !== "object") return { fehler: ["Die Datei ist kein gültiges JSON."], warn, zaehl };
+  if (json.format !== "immobilien-cockpit-import") fehler.push('Feld „format" fehlt oder ist nicht „immobilien-cockpit-import".');
+  if (json.version !== 1) fehler.push('Feld „version" muss 1 sein.');
+  if (json.testdaten) warn.push("Diese Datei enthält Testzahlen. Sie wird beim echten Import abgewiesen.");
+  const S = json.sammlungen;
+  if (!S || typeof S !== "object") { fehler.push('Feld „sammlungen" fehlt.'); return { fehler, warn, zaehl }; }
+  const idOk = id => typeof id === "string" && id.length > 0 && id.length <= 200 && !id.includes("/") && id !== "." && id !== ".." && !/^__.*__$/.test(id);
+  const felderPruefen = (obj, pfad, sammlung) => {
+    Object.entries(obj).forEach(([k, v]) => {
+      if (k === "_unter") return;
+      const p = `${pfad}.${k}`;
+      if (VERBOTEN.test(k)) fehler.push(`${p}: Steuer-ID und Geburtsdatum kommen nicht ins Tool.`);
+      if (NUR_PRIVAT.test(k) && !sammlung.startsWith("privat_")) fehler.push(`${p}: gehört in eine privat_-Sammlung (nur für Sebi).`);
+      if (DATUMSFELDER.test(k)) { const d = w(v); if (d != null && !/^\d{4}-\d{2}-\d{2}$/.test(d)) fehler.push(`${p}: Datum muss JJJJ-MM-TT sein (ist „${d}").`); }
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        if ("wert" in v) { if (v.kz != null && !KZ.includes(v.kz)) warn.push(`${p}: unbekannte Kennzeichnung „${v.kz}".`); }
+        else felderPruefen(v, p, sammlung);
+      }
+      if (k === "zuordnung" && Array.isArray(v)) {
+        const summe = v.reduce((s, z) => s + (Number(z.anteil) || 0), 0);
+        if (Math.abs(summe - 1) > 0.001) warn.push(`${p}: Anteile ergeben ${Math.round(summe * 1000) / 10} % statt 100 %.`);
+      }
+    });
+  };
+  Object.entries(S).forEach(([name, docs]) => {
+    if (!(name in SAMMLUNGEN)) { fehler.push(`Unbekannte Sammlung „${name}".`); return; }
+    if (!docs || typeof docs !== "object") { fehler.push(`Sammlung „${name}" ist leer oder falsch aufgebaut.`); return; }
+    zaehl[name] = { dok: 0, unter: 0 };
+    Object.entries(docs).forEach(([id, e]) => {
+      if (!idOk(id)) { fehler.push(`${name}: ungültige Dokument-ID „${id}".`); return; }
+      zaehl[name].dok++;
+      felderPruefen(e, `${name}/${id}`, name);
+      Object.entries(e._unter || {}).forEach(([sub, eintr]) => {
+        if (!SAMMLUNGEN[name].includes(sub)) { fehler.push(`${name}/${id}: Unter-Sammlung „${sub}" ist nicht vorgesehen.`); return; }
+        Object.entries(eintr || {}).forEach(([sid, se]) => {
+          if (!idOk(sid)) { fehler.push(`${name}/${id}/${sub}: ungültige ID „${sid}".`); return; }
+          zaehl[name].unter++; felderPruefen(se, `${name}/${id}/${sub}/${sid}`, name);
+        });
+      });
+    });
+  });
+  return { fehler, warn, zaehl };
+}
+
+/* Einmaliger Import — in Schritt 3 gesperrt (IMPORT_FREIGEGEBEN = false) */
+async function importiere(json, fortschritt) {
+  if (!IMPORT_FREIGEGEBEN) throw new Error("Der Import ist erst ab Schritt 4 freigeschaltet.");
+  if (json.testdaten) throw new Error("Testzahlen werden nicht importiert.");
+  const p = pruefeImport(json);
+  if (p.fehler.length) throw new Error("Die Datei hat noch Fehler.");
+  const vorhanden = await getDocs(collection(db, "objekte"));
+  if (!vorhanden.empty) throw new Error("In der Datenbank liegen schon Objekte. Der Import ist nur für eine leere Datenbank gedacht.");
+  const ops = [];
+  Object.entries(json.sammlungen).forEach(([name, docs]) => Object.entries(docs).forEach(([id, e]) => {
+    const { _unter, ...felder } = e;
+    ops.push([doc(db, name, id), felder]);
+    Object.entries(_unter || {}).forEach(([sub, eintr]) => Object.entries(eintr).forEach(([sid, se]) => ops.push([doc(db, name, id, sub, sid), se])));
+  }));
+  for (let i = 0; i < ops.length; i += 400) {
+    const b = writeBatch(db);
+    ops.slice(i, i + 400).forEach(([ref, data]) => b.set(ref, data));
+    await b.commit();
+    fortschritt?.(Math.min(ops.length, i + 400), ops.length);
+  }
+  return ops.length;
+}
+
+function ladeHerunter(name, inhalt) {
+  const blob = new Blob([inhalt], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/* =========================================================================
+   6. OBERFLÄCHE — Bausteine
+   ========================================================================= */
+function Karte({ children, className = "" }) {
+  return <div className={`bg-white rounded-2xl border border-slate-200/80 ${className}`}>{children}</div>;
+}
+function Offen({ fehlt }) {
+  return <span className="text-slate-400 italic text-base font-normal">offen — fehlt: {fehlt}</span>;
+}
+function Hinweis({ children }) {
+  return <div className="text-xs text-amber-700 mt-1">{children}</div>;
+}
+function Kennzahl({ titel, wert, unter, hinweis, offen, farbe }) {
+  return (
+    <Karte className="p-4 sm:p-5">
+      <div className="text-xs uppercase tracking-wide text-slate-500">{titel}</div>
+      <div className={`zahl mt-1 text-2xl sm:text-[1.7rem] font-semibold leading-tight ${farbe || "text-slate-900"}`}>
+        {offen ? <Offen fehlt={offen} /> : wert}
+      </div>
+      {unter && <div className="zahl text-xs text-slate-500 mt-1 leading-relaxed">{unter}</div>}
+      {hinweis && <Hinweis>{hinweis}</Hinweis>}
+    </Karte>
+  );
+}
+const cfFarbe = n => n == null ? "" : n < 0 ? "text-rose-700" : "text-slate-900";
+const STUFEN = { vorTilgung: "vor Tilgung", nachKapitaldienst: "nach Kapitaldienst", nachRuecklage: "nach Rücklage" };
+
+function CashflowKennzahl({ cf, fehlt, hinweise, titel = "Cashflow" }) {
+  if (fehlt) return <Kennzahl titel={titel} offen={fehlt} />;
+  const haupt = cf[CASHFLOW_HAUPTSTUFE];
+  const andere = Object.keys(STUFEN).filter(k => k !== CASHFLOW_HAUPTSTUFE)
+    .map(k => `${STUFEN[k]} ${cf[k] == null ? "offen" : eur(cf[k] / 12)}`).join(" · ");
+  return <Kennzahl titel={`${titel} ${STUFEN[CASHFLOW_HAUPTSTUFE]}`} wert={<>{eur(haupt / 12)}<span className="text-sm font-normal text-slate-500"> / Monat</span></>}
+    farbe={cfFarbe(haupt)} unter={<>{eur(haupt)} im Jahr<br />{andere} (je Monat)</>} hinweis={hinweise} />;
+}
+
+/* =========================================================================
+   7. LOGIN
+   ========================================================================= */
+const AUTH_TEXTE = {
+  "auth/invalid-credential": "E-Mail oder Passwort stimmt nicht.",
+  "auth/wrong-password": "E-Mail oder Passwort stimmt nicht.",
+  "auth/user-not-found": "E-Mail oder Passwort stimmt nicht.",
+  "auth/invalid-email": "Die E-Mail-Adresse ist nicht gültig.",
+  "auth/missing-password": "Bitte das Passwort eingeben.",
+  "auth/too-many-requests": "Zu viele Versuche. Bitte ein paar Minuten warten oder das Passwort zurücksetzen.",
+  "auth/network-request-failed": "Keine Verbindung. Bitte Internet prüfen.",
+  "auth/unauthorized-domain": "Diese Adresse ist in Firebase nicht freigegeben (Autorisierte Domains)."
+};
+function Login() {
+  const [modus, setModus] = useState("login");
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [fehler, setFehler] = useState("");
+  const [meldung, setMeldung] = useState("");
+  const [busy, setBusy] = useState(false);
+  const eingabe = "w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-base outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-600/20";
+
+  const anmelden = async e => {
+    e.preventDefault(); setFehler(""); setBusy(true);
+    try { await signInWithEmailAndPassword(auth, email.trim(), pw); }
+    catch (err) { setFehler(AUTH_TEXTE[err.code] || `Anmeldung fehlgeschlagen (${err.code || err.message}).`); }
+    setBusy(false);
+  };
+  const zuruecksetzen = async e => {
+    e.preventDefault(); setFehler(""); setMeldung("");
+    if (!email.trim()) { setFehler("Bitte zuerst die E-Mail-Adresse eingeben."); return; }
+    setBusy(true);
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      setMeldung("Falls zu dieser Adresse ein Zugang besteht, ist jetzt eine E-Mail zum Zurücksetzen unterwegs. Bitte auch im Spam-Ordner nachsehen.");
+    } catch (err) {
+      if (err.code === "auth/user-not-found") setMeldung("Falls zu dieser Adresse ein Zugang besteht, ist jetzt eine E-Mail zum Zurücksetzen unterwegs. Bitte auch im Spam-Ordner nachsehen.");
+      else setFehler(AUTH_TEXTE[err.code] || `Das hat nicht geklappt (${err.code || err.message}).`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ paddingTop: "max(2.5rem, env(safe-area-inset-top))" }}>
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="mx-auto h-12 w-12 rounded-2xl bg-teal-700 text-white flex items-center justify-center text-xl font-semibold">W</div>
+          <h1 className="mt-4 text-2xl font-semibold text-slate-900">Immobilien-Cockpit</h1>
+          <p className="text-slate-500 text-sm mt-1">Immobilien Weizel eGbR</p>
+        </div>
+        <Karte className="p-6">
+          <form onSubmit={modus === "login" ? anmelden : zuruecksetzen} className="space-y-4">
+            <div>
+              <label className="block text-sm text-slate-600 mb-1" htmlFor="email">E-Mail</label>
+              <input id="email" type="email" inputMode="email" autoComplete="username" autoCapitalize="none" autoCorrect="off"
+                className={eingabe} value={email} onChange={e => setEmail(e.target.value)} required />
+            </div>
+            {modus === "login" && (
+              <div>
+                <label className="block text-sm text-slate-600 mb-1" htmlFor="pw">Passwort</label>
+                <input id="pw" type="password" autoComplete="current-password" className={eingabe} value={pw} onChange={e => setPw(e.target.value)} required />
+              </div>
+            )}
+            {fehler && <div className="text-sm text-rose-700 bg-rose-50 rounded-xl px-3 py-2">{fehler}</div>}
+            {meldung && <div className="text-sm text-teal-800 bg-teal-50 rounded-xl px-3 py-2">{meldung}</div>}
+            <button disabled={busy} className="w-full rounded-xl bg-teal-700 hover:bg-teal-800 disabled:opacity-60 text-white font-medium py-3 text-base">
+              {busy ? "Einen Moment …" : modus === "login" ? "Anmelden" : "Link zum Zurücksetzen senden"}
+            </button>
+          </form>
+          <button onClick={() => { setModus(modus === "login" ? "reset" : "login"); setFehler(""); setMeldung(""); }}
+            className="mt-4 w-full text-sm text-teal-700 hover:underline">
+            {modus === "login" ? "Passwort vergessen?" : "Zurück zur Anmeldung"}
+          </button>
+        </Karte>
+        <p className="text-center text-xs text-slate-400 mt-6">{VERSION}</p>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   8. KOPF, BANNER, NAVIGATION
+   ========================================================================= */
+function useRoute() {
+  const [h, setH] = useState(location.hash);
+  useEffect(() => { const f = () => { setH(location.hash); window.scrollTo(0, 0); }; addEventListener("hashchange", f); return () => removeEventListener("hashchange", f); }, []);
+  const teile = h.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  if (teile[0] === "objekt" && teile[1]) return { seite: "objekt", id: teile[1], reiter: teile[2] || "mieten" };
+  if (teile[0] === "import") return { seite: "import" };
+  return { seite: "start" };
+}
+
+function Kopf({ user }) {
+  return (
+    <header className="sticky top-0 z-20 bg-slate-50/90 backdrop-blur border-b border-slate-200/70" style={{ paddingTop: "env(safe-area-inset-top)" }}>
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
+        <a href="#/" className="flex items-center gap-2 min-w-0">
+          <span className="h-8 w-8 rounded-xl bg-teal-700 text-white flex items-center justify-center text-sm font-semibold shrink-0">W</span>
+          <span className="font-semibold text-slate-900 truncate">Immobilien-Cockpit</span>
+        </a>
+        <div className="ml-auto flex items-center gap-1 sm:gap-3 text-sm">
+          <a href="#/import" className="px-2 py-1 rounded-lg text-slate-600 hover:bg-slate-200/60">Import</a>
+          <span className="hidden md:inline text-slate-400 truncate max-w-[14rem]">{user.email}</span>
+          <button onClick={() => signOut(auth)} className="px-2 py-1 rounded-lg text-slate-600 hover:bg-slate-200/60">Abmelden</button>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function Banner({ quelle, fehler }) {
+  if (fehler) return (
+    <div className="rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-sm px-4 py-3 mb-5">
+      <b>Datenbank nicht lesbar:</b> {fehler} Angezeigt werden deshalb Testzahlen.
+    </div>
+  );
+  if (quelle === "test") return (
+    <div className="rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3 mb-5">
+      <b>Testzahlen.</b> Die Datenbank ist noch leer. Die echten Werte kommen nach der Werte-Prüfung per Import (Schritt 4).
+    </div>
+  );
+  return null;
+}
+
+/* =========================================================================
+   9. STARTSEITE
+   ========================================================================= */
+function ohneText(S, k) { return S.ohne[k]?.length ? `ohne ${S.ohne[k].join(", ")} (offen)` : null; }
+
+function Startseite({ ds, alle }) {
+  const S = summiere(alle);
+  const objekteSortiert = [...alle].sort((a, b) => a.id.localeCompare(b.id));
+  const gruppen = []; const gesehen = new Set();
+  objekteSortiert.forEach(R => {
+    const g = R.obj.gruppe;
+    if (g) { if (!gesehen.has(g)) { gesehen.add(g); gruppen.push({ gruppe: g, teile: objekteSortiert.filter(x => x.obj.gruppe === g) }); } }
+    else gruppen.push({ gruppe: null, teile: [R] });
+  });
+  const faellig = liste(ds.fristen).filter(f => f.status !== "erledigt" && f.faellig_am).sort((a, b) => a.faellig_am < b.faellig_am ? -1 : 1).slice(0, 6);
+  const hinweiseCF = [...S.hinweise].join(" · ");
+
+  return (
+    <>
+      <div className="flex items-end justify-between mb-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-900">Bestand</h1>
+          <p className="text-sm text-slate-500">{S.anzahl} Objekte · Stand {datum(heute())}</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <CashflowKennzahl cf={S.cf} fehlt={S.ohne.cf?.length === S.anzahl ? "Cashflow" : null}
+          hinweise={[ohneText(S, "cf"), hinweiseCF].filter(Boolean).join(" · ") || null} />
+        <Kennzahl titel="Kaltmiete" wert={<>{eur(S.mieteMonat)}<span className="text-sm font-normal text-slate-500"> / Monat</span></>}
+          unter={`${eur(S.mieteMonat * 12)} im Jahr`} />
+        <Kennzahl titel="Verkehrswert" wert={eur(S.vwIst)} unter={`Potenzial ${eur(S.vwPot)}`}
+          hinweis={ohneText(S, "vwIst")} />
+        <Kennzahl titel="Restschuld heute" wert={eur(S.restschuld)} unter={`LTV ${proz(S.ltvIst)} vom Verkehrswert`}
+          hinweis={[ohneText(S, "restschuld"), S.gerechnet ? null : "⚠ ohne Live-Stand"].filter(Boolean).join(" · ") || null} />
+      </div>
+
+      <h2 className="mt-8 mb-3 text-sm uppercase tracking-wide text-slate-500">Objekte</h2>
+      <Karte className="overflow-hidden">
+        <div className="hidden md:grid grid-cols-[minmax(0,2.2fr)_repeat(4,minmax(0,1fr))_1.5rem] gap-4 px-5 py-2.5 text-xs uppercase tracking-wide text-slate-400 border-b border-slate-100">
+          <div>Objekt</div><div className="text-right">Kaltmiete / Monat</div><div className="text-right">Cashflow / Monat</div>
+          <div className="text-right">Verkehrswert</div><div className="text-right">Restschuld · LTV</div><div />
+        </div>
+        {gruppen.map((g, i) => g.gruppe
+          ? <GruppenZeilen key={g.gruppe} gruppe={g.gruppe} teile={g.teile} erste={i === 0} />
+          : <ObjektZeile key={g.teile[0].id} R={g.teile[0]} erste={i === 0} />)}
+      </Karte>
+
+      <h2 className="mt-8 mb-3 text-sm uppercase tracking-wide text-slate-500">Als Nächstes fällig</h2>
+      <Karte>
+        {faellig.length === 0 && <div className="px-5 py-4 text-sm text-slate-500">Keine offenen Fristen.</div>}
+        {faellig.map((f, i) => <FristZeile key={f.id} f={f} erste={i === 0} mitObjekt />)}
+      </Karte>
+    </>
+  );
+}
+
+function Zellen({ miete, cf, cfFehlt, vw, vwPot, rs, ltv, rsFehlt, klein }) {
+  const zelle = "text-left md:text-right zahl";
+  return (
+    <>
+      <div className={zelle}><div className="md:hidden text-[11px] text-slate-400">Kaltmiete</div>{eur(miete)}</div>
+      <div className={`${zelle} ${cfFarbe(cf)}`}><div className="md:hidden text-[11px] text-slate-400">Cashflow</div>
+        {cfFehlt ? <span className="text-slate-400 italic text-sm">offen</span> : eur(cf / 12)}</div>
+      <div className={zelle}><div className="md:hidden text-[11px] text-slate-400">Verkehrswert</div>
+        {vw == null ? <span className="text-slate-400 italic text-sm">offen</span> : eur(vw)}
+        {vwPot != null && <div className="text-[11px] text-slate-400">Pot. {eur(vwPot)}</div>}</div>
+      <div className={zelle}><div className="md:hidden text-[11px] text-slate-400">Restschuld</div>
+        {rsFehlt ? <span className="text-slate-400 italic text-sm">offen</span> : eur(rs)}
+        <div className="text-[11px] text-slate-400">LTV {proz(ltv)}</div></div>
+    </>
+  );
+}
+const Pfeil = () => <svg className="hidden md:block w-4 h-4 text-slate-300 group-hover:text-teal-700" viewBox="0 0 20 20" fill="currentColor"><path d="M7.2 4.2a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 1 1-1.4-1.4L11.5 10 7.2 5.6a1 1 0 0 1 0-1.4z" /></svg>;
+const ZEILE = "grid grid-cols-2 md:grid-cols-[minmax(0,2.2fr)_repeat(4,minmax(0,1fr))_1.5rem] gap-x-4 gap-y-2 items-center px-5 py-4";
+
+function ObjektZeile({ R, erste, eingerueckt }) {
+  const cf = R.cashflow;
+  const quote = `${R.quote.gesVermietet}/${R.quote.gesGesamt} vermietet`;
+  return (
+    <a href={`#/objekt/${encodeURIComponent(R.id)}`} className={`group block hover:bg-slate-50 ${erste ? "" : "border-t border-slate-100"}`}>
+      <div className={`${ZEILE} ${eingerueckt ? "md:pl-10" : ""}`}>
+        <div className="col-span-2 md:col-span-1 min-w-0">
+          <div className="flex items-baseline gap-2">
+            <span className="font-medium text-slate-900">{R.obj.bezeichnung || R.id}</span>
+            <span className="text-xs text-slate-400">{R.id}</span>
+          </div>
+          <div className="text-sm text-slate-500 truncate">{R.obj.art} · {quote}
+            {cf.hinweise.length > 0 && !cf.fehlt.length && <span className="text-amber-700"> · {cf.hinweise.join(", ")}</span>}
+          </div>
+        </div>
+        <Zellen miete={R.mieteMonat} cf={cf[CASHFLOW_HAUPTSTUFE]} cfFehlt={cf.fehlt.length > 0} vw={R.vwIst} vwPot={R.vwPot}
+          rs={R.restschuld} ltv={R.ltvIst} rsFehlt={R.restschuldFehlt.length > 0} />
+        <Pfeil />
+      </div>
+    </a>
+  );
+}
+
+function GruppenZeilen({ gruppe, teile, erste }) {
+  const S = summiere(teile);
+  return (
+    <div className={erste ? "" : "border-t border-slate-100"}>
+      <div className={`${ZEILE} bg-slate-50/70`}>
+        <div className="col-span-2 md:col-span-1">
+          <div className="font-medium text-slate-900">{gruppe}</div>
+          <div className="text-sm text-slate-500">Objektgruppe · {teile.length} Häuser zusammen</div>
+        </div>
+        <Zellen miete={S.mieteMonat} cf={S.cf[CASHFLOW_HAUPTSTUFE]} cfFehlt={S.ohne.cf?.length === teile.length} vw={S.vwIst} vwPot={S.vwPot}
+          rs={S.restschuld} ltv={S.ltvIst} rsFehlt={S.ohne.restschuld?.length === teile.length} />
+        <div />
+      </div>
+      {teile.map(R => <ObjektZeile key={R.id} R={R} erste={false} eingerueckt />)}
+    </div>
+  );
+}
+
+function FristZeile({ f, erste, mitObjekt }) {
+  const t = tageBis(f.faellig_am);
+  const farbe = t < 0 ? "text-rose-700" : t <= 30 ? "text-amber-700" : "text-slate-500";
+  const wann = t < 0 ? `seit ${-t} Tagen überfällig` : t === 0 ? "heute" : t === 1 ? "morgen" : `in ${t} Tagen`;
+  return (
+    <div className={`flex items-start gap-4 px-5 py-3 ${erste ? "" : "border-t border-slate-100"}`}>
+      <div className="w-20 shrink-0 zahl text-sm text-slate-900">{datum(f.faellig_am)}</div>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm text-slate-900">{f.titel}</div>
+        <div className="text-xs text-slate-400">
+          {mitObjekt && (f.objekte || [f.objekt]).filter(Boolean).join(", ")}{f.rhythmus ? ` · ${f.rhythmus}` : ""}
+        </div>
+      </div>
+      <div className={`text-xs shrink-0 ${farbe}`}>{wann}</div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   10. OBJEKTSEITE
+   ========================================================================= */
+function ObjektSeite({ R, reiter }) {
+  if (!R) return <Karte className="p-6">Dieses Objekt gibt es nicht. <a className="text-teal-700" href="#/">Zur Übersicht</a></Karte>;
+  const cf = R.cashflow;
+  const quote = `${R.quote.whgVermietet} von ${R.quote.whgGesamt} Wohnungen vermietet`;
+  return (
+    <>
+      <a href="#/" className="text-sm text-teal-700 hover:underline">← Bestand</a>
+      <div className="mt-2 mb-4">
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <h1 className="text-2xl font-semibold text-slate-900">{R.obj.bezeichnung || R.id}</h1>
+          <span className="text-sm text-slate-400">{R.id}</span>
+        </div>
+        <p className="text-sm text-slate-500">{[R.obj.adresse, R.obj.art, R.obj.baujahr && `Baujahr ${R.obj.baujahr}`, R.obj.gruppe].filter(Boolean).join(" · ")}</p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <Kennzahl titel="Kaltmiete" wert={<>{eur(R.mieteMonat)}<span className="text-sm font-normal text-slate-500"> / Monat</span></>}
+          unter={`${quote} · Rendite brutto ${proz(R.renditeBrutto)}`}
+          hinweis={R.kapitalbasisFehlt.length ? `Rendite ohne ${R.kapitalbasisFehlt.join(", ")}` : null} />
+        <CashflowKennzahl cf={cf} fehlt={cf.fehlt.length ? cf.fehlt.join(", ") : null} hinweise={cf.hinweise.join(" · ") || null} />
+        <Kennzahl titel="Verkehrswert" offen={R.vwIst == null ? "Bewertung" : null} wert={eur(R.vwIst)}
+          unter={`Potenzial ${eur(R.vwPot)}${R.wertIst ? ` · ${R.wertIst.methode || ""}, ${datum(R.wertIst.stichtag)}` : ""}`} />
+        <Kennzahl titel="Restschuld heute" offen={R.restschuldFehlt.length ? R.restschuldFehlt.join(", ") : null}
+          wert={R.darlehen.length ? eur(R.restschuld) : "schuldenfrei"}
+          unter={R.darlehen.length ? `LTV ${proz(R.ltvIst)} · Potenzial ${proz(R.ltvPot)}` : null}
+          hinweis={R.restschuldUngerechnet ? "⚠ ohne Live-Stand" : null} />
+      </div>
+
+      <div className="mt-8 border-b border-slate-200 scroll-x">
+        <nav className="flex gap-1 min-w-max">
+          {REITER.map(([k, t]) => (
+            <a key={k} href={`#/objekt/${encodeURIComponent(R.id)}/${k}`}
+              className={`px-3 sm:px-4 py-2.5 text-sm whitespace-nowrap border-b-2 -mb-px ${reiter === k ? "border-teal-700 text-teal-800 font-medium" : "border-transparent text-slate-500 hover:text-slate-800"}`}>{t}</a>
+          ))}
+        </nav>
+      </div>
+      <div className="mt-5">
+        {reiter === "mieten" && <ReiterMieten R={R} />}
+        {reiter === "finanzierung" && <ReiterFinanzierung R={R} />}
+        {reiter === "massnahmen" && <ReiterMassnahmen R={R} />}
+        {reiter === "bewertung" && <ReiterBewertung R={R} />}
+        {reiter === "versicherung" && <ReiterVersicherung R={R} />}
+        {reiter === "fristen" && <ReiterFristen R={R} />}
+      </div>
+    </>
+  );
+}
+
+function Leer({ children }) { return <Karte className="px-5 py-6 text-sm text-slate-500">{children}</Karte>; }
+function Merkmal({ k, v, rechts }) {
+  return <div className="flex justify-between gap-4 py-1.5 text-sm"><span className="text-slate-500">{k}</span><span className={`text-slate-900 zahl text-right ${rechts || ""}`}>{v}</span></div>;
+}
+const Badge = ({ children, farbe = "slate" }) => {
+  const f = { slate: "bg-slate-100 text-slate-600", teal: "bg-teal-50 text-teal-800", amber: "bg-amber-50 text-amber-800" }[farbe];
+  return <span className={`inline-block text-[11px] px-1.5 py-0.5 rounded-md ${f}`}>{children}</span>;
+};
+
+/* --- Reiter: Einheiten & Mieten --- */
+function ReiterMieten({ R }) {
+  if (!R.einheiten.length) return <Leer>Noch keine Einheiten erfasst.</Leer>;
+  const h = heute();
+  return (
+    <div className="space-y-3">
+      {R.einheiten.map(e => {
+        const mv = e.mv;
+        const qm = (e.kaltmiete && e.wohnflaeche) ? e.kaltmiete / e.wohnflaeche : null;
+        const sperre = e.frueheste558 && e.frueheste558 > h;
+        return (
+          <Karte key={e.id} className="p-4 sm:p-5">
+            <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+              <div className="w-full sm:w-44 shrink-0">
+                <div className="font-medium text-slate-900">{e.kuerzel} <span className="text-slate-400 font-normal">· {e.art}</span></div>
+                <div className="text-sm text-slate-500">{[e.lage, e.zimmer && `${e.zimmer} Zi.`, e.wohnflaeche && m2(e.wohnflaeche), e.balkon ? `+ ${m2(e.balkon)} Balkon/Terrasse` : null].filter(Boolean).join(" · ")}</div>
+                {e.moebliert && <div className="mt-1"><Badge farbe="amber">möbliert — Mietspiegel nicht anwendbar</Badge></div>}
+              </div>
+              {mv ? (
+                <>
+                  <div className="min-w-0 flex-1 sm:min-w-[10rem]">
+                    <div className="text-slate-900">{mv.mieter}</div>
+                    <div className="text-sm text-slate-500">seit {datum(mv.beginn)}</div>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {mv.art === "gesellschafter" && <Badge farbe="teal">Gesellschafter / nahestehend</Badge>}
+                      {mv.gehoert_zu && <Badge>gehört zu {(mv.gehoert_zu.match(/(WE|GA)\d+/) || [mv.gehoert_zu])[0]}</Badge>}
+                    </div>
+                    {mv.besonderheiten && <div className="text-xs text-slate-500 mt-1">{mv.besonderheiten}</div>}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-2 w-full lg:w-auto text-sm">
+                    <div><div className="text-[11px] text-slate-400">Kaltmiete</div><div className="zahl font-medium text-slate-900">{e.kaltmiete == null ? <span className="italic text-slate-400">offen</span> : eur2(e.kaltmiete)}</div></div>
+                    <div><div className="text-[11px] text-slate-400">je m²</div><div className="zahl">{qm ? eur2(qm) : "–"}</div></div>
+                    <div><div className="text-[11px] text-slate-400">NK-Vorauszahlung</div><div className="zahl">{e.vorauszahlung ? eur2(e.vorauszahlung) : "–"}</div></div>
+                    <div><div className="text-[11px] text-slate-400">Kaution</div><div className="zahl">{zahl(mv.kaution) ? eur(zahl(mv.kaution)) : "–"}</div></div>
+                  </div>
+                  {e.art === "Wohnung" && (
+                    <div className="w-full text-xs text-slate-500 border-t border-slate-100 pt-2 flex flex-wrap gap-x-5 gap-y-1">
+                      <span>Letzte Änderung: {e.letzteAenderung ? `${monatJahr(e.letzteAenderung.gueltig_ab)} (${e.letzteAenderung.art_aenderung || "–"})` : "–"}</span>
+                      <span>Letzte § 558: {e.letzte558 ? monatJahr(e.letzte558.gueltig_ab) : "keine"}</span>
+                      <span className={sperre ? "" : "text-teal-700"}>§ 558 frühestens wirksam ab {e.frueheste558 ? monatJahr(e.frueheste558) : "–"}{!sperre && e.frueheste558 ? " (möglich)" : ""}</span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-sm text-slate-400 italic self-center">leer — kein laufendes Mietverhältnis</div>
+              )}
+            </div>
+          </Karte>
+        );
+      })}
+      <div className="text-xs text-slate-400 px-1">§ 558: frühestens 15 Monate nach der letzten Änderung außer § 559. Kappungsgrenze und Vergleichsmiete sind hier nicht geprüft.</div>
+    </div>
+  );
+}
+
+/* --- Reiter: Finanzierung (inkl. Cashflow-Herleitung) --- */
+function ReiterFinanzierung({ R }) {
+  const cf = R.cashflow;
+  const zeile = (k, v, fett, minus) => (
+    <div className={`flex justify-between py-1.5 text-sm ${fett ? "border-t border-slate-200 font-medium text-slate-900" : "text-slate-600"}`}>
+      <span>{k}</span><span className={`zahl ${fett ? cfFarbe(v) : ""}`}>{v == null ? <span className="italic text-slate-400">offen</span> : fett ? eur(v) : `${minus ? "− " : ""}${eur(Math.abs(v))}`}</span>
+    </div>
+  );
+  return (
+    <div className="grid lg:grid-cols-2 gap-4">
+      <div className="space-y-3">
+        {R.darlehen.length === 0 && <Leer>Keine Darlehen — das Objekt ist schuldenfrei.</Leer>}
+        {R.darlehen.map(({ d, anteil, r }) => (
+          <Karte key={d.id} className="p-4 sm:p-5">
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="font-medium text-slate-900">{d.zweck || "Darlehen"}</div>
+              <div className="text-xs text-slate-400">{d.id}</div>
+            </div>
+            <div className="text-sm text-slate-500 mb-2">{d.bank}{anteil < 1 ? ` · Anteil ${proz(anteil, 0)}` : ""}</div>
+            {d.darlehensnehmer_rechtlich && d.darlehensnehmer_wirtschaftlich && d.darlehensnehmer_rechtlich !== d.darlehensnehmer_wirtschaftlich &&
+              <div className="mb-2"><Badge farbe="amber">rechtlich: {d.darlehensnehmer_rechtlich} · wirtschaftlich: {d.darlehensnehmer_wirtschaftlich}</Badge></div>}
+            <Merkmal k="Zins" v={zahl(d.zins) != null ? `${zahl(d.zins).toLocaleString("de-DE")} %` : "offen"} />
+            <Merkmal k="Rate / Monat" v={zahl(d.rate) != null ? eur(zahl(d.rate)) + (anteil < 1 ? ` (anteilig ${eur(zahl(d.rate) * anteil)})` : "") : "offen"} />
+            <Merkmal k="Zinsbindung bis" v={datum(d.bindung_bis)} />
+            <Merkmal k={`Restschuld heute${anteil < 1 ? " (gesamt)" : ""}`} v={r.heute != null ? eur(r.heute) : "offen"} />
+            {anteil < 1 && r.heute != null && <Merkmal k="davon dieses Objekt" v={eur(r.heute * anteil)} />}
+            <Merkmal k="Restschuld zum Bindungsende" v={r.bindungsende != null ? eur(r.bindungsende * anteil) + (anteil < 1 ? " (anteilig)" : "") : "–"} />
+            <div className="text-xs text-slate-400 mt-1">Letzter Stand {datum(r.stichtag)}{r.gerechnet ? ", auf heute gerechnet aus Zins und Rate" : ""}{r.fehlt.length ? ` · ⚠ fehlt: ${r.fehlt.join(", ")}` : ""}</div>
+          </Karte>
+        ))}
+        {R.grundschulden.length > 0 && (
+          <Karte className="p-4 sm:p-5">
+            <div className="font-medium text-slate-900 mb-2">Grundschulden</div>
+            {R.grundschulden.map(g => (
+              <Merkmal key={g.id} k={<>{g.extern ? <span>{g.extern}</span> : <span>Blatt {g.blatt}, Rang {g.rang}</span>}
+                {(g.belastet || []).length > 1 && <span className="text-slate-400"> · gesamthaft auf {g.belastet.join(", ")}</span>}</>} v={eur(zahl(g.betrag))} />
+            ))}
+          </Karte>
+        )}
+      </div>
+      <Karte className="p-4 sm:p-5 self-start">
+        <div className="font-medium text-slate-900">Cashflow — Herleitung je Jahr</div>
+        <div className="text-xs text-slate-400 mb-3">Kaltmiete heute × 12, Zinsen und Tilgung der nächsten 12 Monate{R.kostenJahr ? `, Kosten ${R.kostenJahr}` : ""}</div>
+        {cf.fehlt.length ? <div className="text-sm"><Offen fehlt={cf.fehlt.join(", ")} /></div> : <>
+          {zeile("Kaltmiete (inkl. Garagen)", R.mieteJahr)}
+          {zeile("nicht umlagefähige Kosten", R.kostenNU, false, true)}
+          {zeile("Zinsen", R.zinsenJahr, false, true)}
+          {zeile("Cashflow vor Tilgung", cf.vorTilgung, true)}
+          {zeile("Tilgung", R.kapitaldienstJahr - R.zinsenJahr, false, true)}
+          {zeile("Cashflow nach Kapitaldienst", cf.nachKapitaldienst, true)}
+          {zeile(R.annahme?.ruecklage_art === "weg" ? "Rücklage (WEG, Wirtschaftsplan)" : `Rücklage (${zahl(R.annahme?.ruecklage_satz) ?? "–"} €/m² × ${m2(R.wohnflaeche)})`, R.ruecklage, false, true)}
+          {zeile("Cashflow nach Rücklage", cf.nachRuecklage, true)}
+          {cf.hinweise.length > 0 && <Hinweis>{cf.hinweise.join(" · ")}</Hinweis>}
+          {cf.fehltRuecklage && <Hinweis>Rücklage offen — fehlt: Annahme</Hinweis>}
+        </>}
+      </Karte>
+    </div>
+  );
+}
+
+/* --- Reiter: Maßnahmen --- */
+function ReiterMassnahmen({ R }) {
+  if (!R.massnahmen.length) return <Leer>Noch keine Maßnahmen erfasst.</Leer>;
+  const s = { st: 0, bz: 0, wt: 0, h: 0 };
+  R.massnahmen.filter(x => !x.m.voreigentuemer).forEach(({ m, anteil }) => {
+    s.st += (zahl(m.steuerlich) || 0) * anteil; s.bz += (zahl(m.bezahlt) || 0) * anteil; s.wt += (zahl(m.wert) || 0) * anteil; s.h += (Number(m.stunden) || 0) * anteil;
+  });
+  const betr = (x, a) => zahl(x) == null ? "–" : eur(zahl(x) * a);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Kennzahl titel="steuerlich" wert={eur(s.st)} />
+        <Kennzahl titel="bezahlt" wert={eur(s.bz)} />
+        <Kennzahl titel="Wert" wert={eur(s.wt)} />
+        <Kennzahl titel="Eigenleistung" wert={eur(s.wt - s.bz)} unter={`${Math.round(s.h).toLocaleString("de-DE")} Stunden`} />
+      </div>
+      <div className="text-xs text-slate-400 px-1">Summen anteilig für dieses Objekt, ohne Maßnahmen der Voreigentümer. Eigenleistung = Wert − bezahlt.</div>
+      {R.massnahmen.map(({ m, anteil }) => (
+        <Karte key={m.id} className="p-4 sm:p-5">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <div className="font-medium text-slate-900">{m.titel}</div>
+            <div className="text-sm text-slate-500">{monatJahr(m.von)}{m.bis ? ` – ${monatJahr(m.bis)}` : ""} · {m.kategorie}</div>
+            {anteil < 1 && <Badge>Anteil {proz(anteil, 0)}</Badge>}
+            {m.voreigentuemer && <Badge>Voreigentümer</Badge>}
+            {m.mietwirkung && <Badge farbe="teal">{m.mietwirkung}</Badge>}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-6 gap-y-2 mt-3 text-sm">
+            <div><div className="text-[11px] text-slate-400">steuerlich</div><div className="zahl">{betr(m.steuerlich, anteil)}</div></div>
+            <div><div className="text-[11px] text-slate-400">bezahlt</div><div className="zahl">{betr(m.bezahlt, anteil)}</div></div>
+            <div><div className="text-[11px] text-slate-400">Wert</div><div className="zahl">{betr(m.wert, anteil)}</div></div>
+            <div><div className="text-[11px] text-slate-400">Eigenleistung</div><div className="zahl">{(zahl(m.wert) != null && zahl(m.bezahlt) != null) ? eur((zahl(m.wert) - zahl(m.bezahlt)) * anteil) : "–"}</div></div>
+            <div><div className="text-[11px] text-slate-400">Stunden</div><div className="zahl">{m.stunden ? Math.round(m.stunden * anteil).toLocaleString("de-DE") : "–"}</div></div>
+          </div>
+        </Karte>
+      ))}
+    </div>
+  );
+}
+
+/* --- Reiter: Bewertung --- */
+function ReiterBewertung({ R }) {
+  const zuwachs = (R.vwIst != null && !R.kapitalbasisFehlt.length) ? R.vwIst - R.kapitalbasis : null;
+  return (
+    <div className="grid lg:grid-cols-2 gap-4">
+      <Karte className="p-4 sm:p-5 self-start">
+        <div className="font-medium text-slate-900 mb-2">Wert und Kapital</div>
+        <Merkmal k="Verkehrswert Ist" v={R.vwIst != null ? eur(R.vwIst) : "offen"} />
+        <Merkmal k="Verkehrswert Potenzial" v={R.vwPot != null ? eur(R.vwPot) : "offen"} />
+        <Merkmal k="Kapitalbasis (bezahlt)" v={R.kapitalbasisFehlt.length ? `offen — fehlt: ${R.kapitalbasisFehlt.join(", ")}` : eur(R.kapitalbasis)} />
+        <Merkmal k="Wertzuwachs gegenüber Kapitalbasis" v={zuwachs == null ? "–" : `${eur(zuwachs)} (${proz(zuwachs / R.kapitalbasis)})`} />
+        <Merkmal k="Restschuld heute" v={eur(R.restschuld)} />
+        <Merkmal k="Nettovermögen (Ist − Restschuld)" v={R.vwIst != null ? eur(R.vwIst - R.restschuld) : "–"} />
+        <Merkmal k="LTV Ist / Potenzial" v={`${proz(R.ltvIst)} / ${proz(R.ltvPot)}`} />
+        <div className="text-xs text-slate-400 mt-2">Kapitalbasis = Kaufpreis + Kaufnebenkosten + bezahlte Maßnahmen (anteilig, ohne Voreigentümer).</div>
+      </Karte>
+      <div className="space-y-3">
+        {R.bewertungen.length === 0 && <Leer>Noch keine Bewertung erfasst.</Leer>}
+        {R.bewertungen.map(b => (
+          <Karte key={b.id} className="p-4 flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm text-slate-900">{b.methode} <Badge farbe={b.art === "ist" ? "teal" : "slate"}>{b.art === "ist" ? "Ist" : "Potenzial"}</Badge></div>
+              <div className="text-xs text-slate-400">{datum(b.stichtag)}{b.quelle ? ` · ${b.quelle}` : ""}</div>
+            </div>
+            <div className="zahl font-medium text-slate-900">{eur(zahl(b.wert))}</div>
+          </Karte>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* --- Reiter: Versicherung --- */
+function ReiterVersicherung({ R }) {
+  if (!R.versicherungen.length) return <Leer>{R.obj.versicherung_ueber_weg ? "Das Gebäude ist über die Eigentümergemeinschaft versichert (Wirtschaftsplan)." : "Noch keine Versicherung erfasst."}</Leer>;
+  return (
+    <div className="grid lg:grid-cols-2 gap-4">
+      {R.versicherungen.map(v => {
+        const fv = zahl(v.flaeche_versichert), ft = zahl(v.flaeche_tatsaechlich);
+        const beitraege = liste(v._unter?.beitraege).sort((a, b) => Number(a.jahr) - Number(b.jahr));
+        return (
+          <Karte key={v.id} className="p-4 sm:p-5">
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="font-medium text-slate-900">{v.versicherer}</div>
+              <div className="text-xs text-slate-400">{v.vertragsnummer}</div>
+            </div>
+            <div className="text-sm text-slate-500 mb-2">{v.sparten}</div>
+            <Merkmal k="Versicherungsnehmer" v={v.vn_soll && v.vn_ist !== v.vn_soll ? <span className="text-amber-700">{v.vn_ist} (soll: {v.vn_soll})</span> : v.vn_ist} />
+            <Merkmal k="Fläche versichert / tatsächlich" v={<span className={fv != null && ft != null && fv < ft ? "text-amber-700" : ""}>{m2(fv)} / {m2(ft)}</span>} />
+            {fv != null && ft != null && fv < ft && <Hinweis>Versicherte Fläche kleiner als tatsächliche — Unterversicherungsverzicht prüfen.</Hinweis>}
+            <Merkmal k="Kündigungsfrist" v={v.kuendigungsfrist || "–"} />
+            <div className="mt-2 pt-2 border-t border-slate-100">
+              {beitraege.map(b => <Merkmal key={b.id} k={`Beitrag ${b.jahr}`} v={eur2(zahl(b.betrag))} />)}
+            </div>
+          </Karte>
+        );
+      })}
+    </div>
+  );
+}
+
+/* --- Reiter: Fristen --- */
+function ReiterFristen({ R }) {
+  if (!R.fristen.length) return <Leer>Keine offenen Fristen.</Leer>;
+  return <Karte>{R.fristen.map((f, i) => <FristZeile key={f.id} f={f} erste={i === 0} />)}</Karte>;
+}
+
+/* =========================================================================
+   11. IMPORT-SEITE (Vorbereitung Schritt 4)
+   ========================================================================= */
+function ImportSeite() {
+  const [datei, setDatei] = useState(null);
+  const [json, setJson] = useState(null);
+  const [pruefung, setPruefung] = useState(null);
+  const [status, setStatus] = useState("");
+
+  const lesen = async f => {
+    setDatei(f?.name || null); setJson(null); setPruefung(null); setStatus("");
+    if (!f) return;
+    try { const j = JSON.parse(await f.text()); setJson(j); setPruefung(pruefeImport(j)); }
+    catch { setPruefung({ fehler: ["Die Datei ist kein gültiges JSON."], warn: [], zaehl: {} }); }
+  };
+  const vorlage = () => ladeHerunter("cockpit-import-testzahlen.json",
+    JSON.stringify({ format: "immobilien-cockpit-import", version: 1, testdaten: true, erstellt: heute(),
+      hinweis: "Vorlage mit Testzahlen. Werte als {wert, kz, quelle, notiz}; kz: belegt / B / ⚠ / ⚡. Datum als JJJJ-MM-TT. Zins in Prozent (1.2 = 1,2 %). Verläufe unter _unter.",
+      sammlungen: baueTestdaten() }, null, 2));
+  const starten = async () => {
+    setStatus("Import läuft …");
+    try { const n = await importiere(json, (a, b) => setStatus(`Import läuft … ${a} von ${b}`)); setStatus(`Fertig: ${n} Einträge geschrieben. Bitte Seite neu laden.`); }
+    catch (e) { setStatus(e.message); }
+  };
+  const ok = pruefung && !pruefung.fehler.length;
+
+  return (
+    <>
+      <a href="#/" className="text-sm text-teal-700 hover:underline">← Bestand</a>
+      <h1 className="mt-2 text-2xl font-semibold text-slate-900">Import</h1>
+      <p className="text-sm text-slate-500 mb-5">Einmaliger Datenimport (Schritt 4). Jetzt nur Prüfung und Vorschau — geschrieben wird noch nichts.</p>
+      <div className="grid lg:grid-cols-2 gap-4">
+        <Karte className="p-5 space-y-4 self-start">
+          <div>
+            <div className="font-medium text-slate-900">1. Datei wählen</div>
+            <p className="text-sm text-slate-500">Eine .json-Datei im Import-Format.</p>
+          </div>
+          <label className="block">
+            <span className="inline-block rounded-xl border border-slate-300 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 cursor-pointer">Datei auswählen …</span>
+            <input type="file" accept=".json,application/json" className="hidden" onChange={e => lesen(e.target.files[0])} />
+            {datei && <span className="ml-3 text-sm text-slate-500">{datei}</span>}
+          </label>
+          <div className="pt-3 border-t border-slate-100">
+            <div className="font-medium text-slate-900">Vorlage</div>
+            <p className="text-sm text-slate-500 mb-2">Zeigt den Aufbau der Import-Datei (mit Testzahlen).</p>
+            <button onClick={vorlage} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50">Vorlage herunterladen</button>
+          </div>
+        </Karte>
+        <Karte className="p-5 self-start">
+          <div className="font-medium text-slate-900 mb-2">2. Prüfung und Vorschau</div>
+          {!pruefung && <p className="text-sm text-slate-400">Noch keine Datei gewählt.</p>}
+          {pruefung && <>
+            <div className={`text-sm rounded-xl px-3 py-2 mb-3 ${ok ? "bg-teal-50 text-teal-800" : "bg-rose-50 text-rose-800"}`}>
+              {ok ? "Keine Fehler gefunden." : `${pruefung.fehler.length} Fehler gefunden.`}{pruefung.warn.length ? ` ${pruefung.warn.length} Hinweis(e).` : ""}
+            </div>
+            {Object.keys(pruefung.zaehl).length > 0 && (
+              <div className="mb-3">
+                {Object.entries(pruefung.zaehl).map(([k, z]) => <Merkmal key={k} k={k} v={`${z.dok} Dok.${z.unter ? ` + ${z.unter} Verlauf` : ""}`} />)}
+              </div>
+            )}
+            {pruefung.fehler.slice(0, 30).map((f, i) => <div key={"f" + i} className="text-xs text-rose-700 py-0.5">✗ {f}</div>)}
+            {pruefung.warn.slice(0, 30).map((f, i) => <div key={"w" + i} className="text-xs text-amber-700 py-0.5">! {f}</div>)}
+          </>}
+          <div className="mt-4 pt-3 border-t border-slate-100">
+            <button disabled={!IMPORT_FREIGEGEBEN || !ok || json?.testdaten} onClick={starten}
+              className="rounded-xl bg-teal-700 text-white px-4 py-2.5 text-sm disabled:bg-slate-200 disabled:text-slate-500">3. Import starten</button>
+            <div className="text-xs text-slate-400 mt-2">{IMPORT_FREIGEGEBEN ? "Nur in eine leere Datenbank." : "Gesperrt — wird in Schritt 4 nach der Werte-Prüfung freigeschaltet."}</div>
+            {status && <div className="text-sm text-slate-700 mt-2">{status}</div>}
+          </div>
+        </Karte>
+      </div>
+    </>
+  );
+}
+
+/* =========================================================================
+   12. APP
+   ========================================================================= */
+function App() {
+  const [user, setUser] = useState(undefined);
+  const [ds, setDs] = useState(null);
+  const [quelle, setQuelle] = useState(null);
+  const [fehler, setFehler] = useState("");
+  const route = useRoute();
+
+  useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), []);
+  useEffect(() => {
+    if (!user) { setDs(null); return; }
+    (async () => {
+      try {
+        const echt = await ladeAusFirestore();
+        if (Object.keys(echt.objekte || {}).length) { setDs(echt); setQuelle("firestore"); }
+        else { setDs(baueTestdaten()); setQuelle("test"); }
+      } catch (e) {
+        setFehler(e.code === "permission-denied" ? "Kein Lesezugriff (Firestore-Regeln prüfen)." : `${e.code || e.message}.`);
+        setDs(baueTestdaten()); setQuelle("test");
+      }
+    })();
+  }, [user]);
+
+  const alle = useMemo(() => ds ? Object.keys(ds.objekte || {}).filter(id => (ds.objekte[id].status || "Bestand") !== "verkauft").map(id => berechneObjekt(ds, id)) : [], [ds]);
+
+  if (user === undefined) return <div className="p-12 text-center text-slate-400">Einen Moment …</div>;
+  if (!user) return <Login />;
+  return (
+    <div className="min-h-screen">
+      <Kopf user={user} />
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6" style={{ paddingBottom: "max(2rem, env(safe-area-inset-bottom))" }}>
+        {!ds ? <div className="p-12 text-center text-slate-400">Daten werden geladen …</div> : <>
+          <Banner quelle={quelle} fehler={fehler} />
+          {route.seite === "start" && <Startseite ds={ds} alle={alle} />}
+          {route.seite === "objekt" && <ObjektSeite R={alle.find(R => R.id === route.id)} reiter={route.reiter} />}
+          {route.seite === "import" && <ImportSeite />}
+        </>}
+        <footer className="mt-12 text-xs text-slate-400 text-center">Nur lesend · Kennzahlen werden beim Öffnen berechnet · {VERSION}</footer>
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
